@@ -1,5 +1,5 @@
 import { GoogleGenAI, Chat, Type, Content, Modality } from "@google/genai";
-import type { StorySegment, GameTurn } from '../types';
+import type { StorySegment, GameTurn, Difficulty } from '../types';
 
 const API_KEY = process.env.API_KEY;
 
@@ -67,16 +67,20 @@ const responseSchema = {
   required: ["story", "image_prompt", "choices", "inventory_update", "quest_update"]
 };
 
-
-const systemInstruction = `You are an expert storyteller for an infinite, choice-driven text adventure game. Your role is to generate the next part of the story based on the user's choices.
+const createSystemInstruction = (difficulty: Difficulty): string => `You are an expert storyteller for an infinite, choice-driven text adventure game. Your role is to generate the next part of the story based on the user's choices.
+The current game difficulty is set to '${difficulty}'. You must adjust the story challenges, enemy strength, and resource availability accordingly.
+- 'Easy' should be forgiving with plentiful resources and weaker enemies.
+- 'Normal' should offer a balanced challenge.
+- 'Hard' should be punishing, with scarce resources and dangerous, intelligent foes.
 You MUST ALWAYS respond with a valid JSON object matching this schema:
 ${JSON.stringify(responseSchema, null, 2)}
 - The story should be continuous and adapt to the player's choices.
 - Keep the story engaging and introduce challenges, characters, and items.
 - The 'image_prompt' MUST be descriptive and consistent with the specified art style.
 - Inventory and quest updates must logically follow from the story.
-- If the player's inventory is empty, have them find an item soon.
+- If the player's inventory is empty, have them find an item soon (more quickly on Easy).
 - Provide meaningful choices that impact the narrative.`;
+
 
 const mapHistoryForGemini = (history: GameTurn[]): Content[] => {
   return history.map(turn => ({
@@ -85,12 +89,12 @@ const mapHistoryForGemini = (history: GameTurn[]): Content[] => {
   }));
 };
 
-export const createAdventureChat = (history: GameTurn[] = []): Chat => {
+export const createAdventureChat = (history: GameTurn[] = [], difficulty: Difficulty): Chat => {
   return ai.chats.create({
     model: storyModel,
     history: mapHistoryForGemini(history),
     config: {
-      systemInstruction: systemInstruction,
+      systemInstruction: createSystemInstruction(difficulty),
       responseMimeType: "application/json",
       responseSchema: responseSchema,
     },

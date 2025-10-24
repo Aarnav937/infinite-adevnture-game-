@@ -1,4 +1,6 @@
 
+export type Difficulty = 'Easy' | 'Normal' | 'Hard';
+
 export interface Choice {
   text: string;
 }

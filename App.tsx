@@ -3,11 +3,16 @@ import type { Chat } from "@google/genai";
 import Sidebar from './components/Sidebar';
 import StoryDisplay from './components/StoryDisplay';
 import ChoiceButtons from './components/ChoiceButtons';
+import DifficultySelector from './components/DifficultySelector';
+import LoadingSpinner from './components/LoadingSpinner';
 import { createAdventureChat, parseGeminiResponse, generateImage, generateSpeech } from './services/geminiService';
-import type { Choice, StorySegment, InventoryUpdate, GameTurn } from './types';
-import { Github, Sparkles, Save } from 'lucide-react';
+import type { Choice, StorySegment, InventoryUpdate, GameTurn, Difficulty } from './types';
+import { Github, Sparkles, Save, Volume2, VolumeX } from 'lucide-react';
 
 const SAVE_GAME_KEY = 'infiniteAdventureSaveData';
+const TTS_ENABLED_KEY = 'infiniteAdventureTtsEnabled';
+
+type GameState = 'loading' | 'selecting_difficulty' | 'playing';
 
 // Helper functions for audio decoding based on Gemini API documentation
 function decode(base64: string) {
@@ -47,12 +52,16 @@ const App: React.FC = () => {
   const [currentStory, setCurrentStory] = useState<string>('');
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [choices, setChoices] = useState<Choice[]>([]);
+  
+  const [gameState, setGameState] = useState<GameState>('loading');
+  const [difficulty, setDifficulty] = useState<Difficulty>('Normal');
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isImageLoading, setIsImageLoading] = useState<boolean>(true);
   const [isStoryLoading, setIsStoryLoading] = useState<boolean>(true);
   const [saveButtonText, setSaveButtonText] = useState('Save Game');
 
+  const [isTtsEnabled, setIsTtsEnabled] = useState<boolean>(true);
   const [isAudioLoading, setIsAudioLoading] = useState<boolean>(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState<boolean>(false);
   const [canPlayAudio, setCanPlayAudio] = useState<boolean>(false);
@@ -90,6 +99,13 @@ const App: React.FC = () => {
   }, [stopAudio]);
 
   const generateAndPlayAudio = useCallback(async (text: string) => {
+    if (!isTtsEnabled) {
+      setIsAudioLoading(false);
+      setCanPlayAudio(false);
+      currentAudioBufferRef.current = null;
+      return;
+    }
+
     setIsAudioLoading(true);
     setCanPlayAudio(false);
     stopAudio();
@@ -116,7 +132,7 @@ const App: React.FC = () => {
     } finally {
         setIsAudioLoading(false);
     }
-}, [playAudioBuffer, stopAudio]);
+}, [playAudioBuffer, stopAudio, isTtsEnabled]);
 
   const handleToggleAudio = useCallback(() => {
     if (isAudioPlaying) {
@@ -125,6 +141,19 @@ const App: React.FC = () => {
         playAudioBuffer(currentAudioBufferRef.current);
     }
   }, [isAudioPlaying, canPlayAudio, stopAudio, playAudioBuffer]);
+
+  const handleToggleTts = useCallback(() => {
+    setIsTtsEnabled(prev => {
+        const newState = !prev;
+        localStorage.setItem(TTS_ENABLED_KEY, JSON.stringify(newState));
+        if (!newState) {
+            stopAudio();
+            setCanPlayAudio(false);
+            currentAudioBufferRef.current = null;
+        }
+        return newState;
+    });
+}, [stopAudio]);
 
   const processInventoryUpdates = useCallback((updates: InventoryUpdate[]) => {
     setInventory(prevInventory => {
@@ -167,7 +196,7 @@ const App: React.FC = () => {
     setIsLoading(true);
     
     if (!chatRef.current) {
-      chatRef.current = createAdventureChat(gameHistoryRef.current);
+      chatRef.current = createAdventureChat(gameHistoryRef.current, difficulty);
     }
     
     gameHistoryRef.current.push({ role: 'user', text: prompt });
@@ -199,9 +228,9 @@ const App: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [streamStory, updateGameState, generateAndPlayAudio, stopAudio]);
+  }, [streamStory, updateGameState, generateAndPlayAudio, stopAudio, difficulty]);
 
-  const startGame = useCallback(() => {
+  const startNewGame = useCallback(() => {
     stopAudio();
     localStorage.removeItem(SAVE_GAME_KEY);
     chatRef.current = null;
@@ -212,22 +241,29 @@ const App: React.FC = () => {
     setImageUrl(null);
     setChoices([]);
     setCanPlayAudio(false);
-    getNextStep("Start my adventure in a fantasy world. I am a novice adventurer with no items.");
-  }, [getNextStep, stopAudio]);
+    setGameState('selecting_difficulty');
+  }, [stopAudio]);
+  
+  const beginAdventure = useCallback(async (selectedDifficulty: Difficulty) => {
+    setDifficulty(selectedDifficulty);
+    setGameState('playing');
+    await getNextStep(`Start my adventure in a fantasy world on ${selectedDifficulty} difficulty. I am a novice adventurer with no items.`);
+  }, [getNextStep]);
 
   const saveGame = useCallback(() => {
-    if (isLoading) return;
+    if (isLoading || gameState !== 'playing') return;
 
-    const gameState = {
+    const gameStateToSave = {
         quest,
         inventory,
         currentStory,
         imageUrl,
         choices,
         gameHistory: gameHistoryRef.current,
+        difficulty,
     };
-    localStorage.setItem(SAVE_GAME_KEY, JSON.stringify(gameState));
-  }, [quest, inventory, currentStory, imageUrl, choices, isLoading]);
+    localStorage.setItem(SAVE_GAME_KEY, JSON.stringify(gameStateToSave));
+  }, [quest, inventory, currentStory, imageUrl, choices, isLoading, difficulty, gameState]);
 
   const handleSaveClick = () => {
     saveGame();
@@ -238,6 +274,11 @@ const App: React.FC = () => {
   };
   
   useEffect(() => {
+    const savedTtsPref = localStorage.getItem(TTS_ENABLED_KEY);
+    if (savedTtsPref !== null) {
+      setIsTtsEnabled(JSON.parse(savedTtsPref));
+    }
+
     const savedDataJSON = localStorage.getItem(SAVE_GAME_KEY);
     if (savedDataJSON) {
       try {
@@ -247,28 +288,67 @@ const App: React.FC = () => {
         setCurrentStory(savedData.currentStory);
         setImageUrl(savedData.imageUrl);
         setChoices(savedData.choices);
+        setDifficulty(savedData.difficulty || 'Normal');
         gameHistoryRef.current = savedData.gameHistory;
         
-        chatRef.current = createAdventureChat(gameHistoryRef.current);
+        chatRef.current = createAdventureChat(gameHistoryRef.current, savedData.difficulty || 'Normal');
         
         setIsLoading(false);
         setIsImageLoading(false);
         setIsStoryLoading(false);
-        setCanPlayAudio(false); // Can't replay audio from save, user must trigger new turn
+        setCanPlayAudio(false);
+        setGameState('playing');
       } catch (error) {
         console.error("Failed to parse saved data, starting new game.", error);
-        startGame();
+        setGameState('selecting_difficulty');
       }
     } else {
-      startGame();
+      setGameState('selecting_difficulty');
     }
-  }, [startGame]);
+  }, []);
 
   const handleChoice = (choice: string) => {
     if (choice === "Restart my journey") {
-      startGame();
+      startNewGame();
     } else {
       getNextStep(`My choice is: "${choice}"`);
+    }
+  };
+  
+  const renderContent = () => {
+    switch (gameState) {
+        case 'loading':
+            return <div className="flex justify-center items-center h-64"><LoadingSpinner size="lg" /></div>;
+        case 'selecting_difficulty':
+            return <DifficultySelector onSelect={beginAdventure} />;
+        case 'playing':
+            return (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-8">
+                    <div className="lg:col-span-1">
+                      <Sidebar quest={quest} inventory={inventory} />
+                    </div>
+                    <div className="lg:col-span-2 flex flex-col gap-4 md:gap-8">
+                      <StoryDisplay
+                        imageUrl={imageUrl}
+                        storyText={currentStory}
+                        isImageLoading={isImageLoading}
+                        isStoryLoading={isStoryLoading}
+                        isTtsEnabled={isTtsEnabled}
+                        isAudioLoading={isAudioLoading}
+                        isAudioPlaying={isAudioPlaying}
+                        canPlayAudio={canPlayAudio}
+                        onToggleAudio={handleToggleAudio}
+                      />
+                      <ChoiceButtons
+                        choices={choices}
+                        onChoice={handleChoice}
+                        isLoading={isLoading}
+                      />
+                    </div>
+                </div>
+            );
+        default:
+            return null;
     }
   };
 
@@ -280,9 +360,16 @@ const App: React.FC = () => {
             <h1 className="text-2xl font-bold text-gray-100">Infinite Adventure Engine</h1>
         </div>
         <div className="flex items-center gap-4">
+            <button
+                onClick={handleToggleTts}
+                className="text-gray-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-gray-700/50"
+                aria-label={isTtsEnabled ? "Disable Narration" : "Enable Narration"}
+            >
+                {isTtsEnabled ? <Volume2 size={24} /> : <VolumeX size={24} />}
+            </button>
             <button 
                 onClick={handleSaveClick}
-                disabled={isLoading}
+                disabled={isLoading || gameState !== 'playing'}
                 className="flex items-center gap-2 bg-gray-800 text-gray-200 px-4 py-2 rounded-lg border-2 border-gray-700 hover:border-cyan-500 hover:bg-gray-700 transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 focus:ring-offset-gray-900 disabled:opacity-50 disabled:cursor-not-allowed"
             >
                 <Save size={18} />
@@ -294,27 +381,8 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      <main className="p-4 md:p-8 grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-8 max-w-7xl mx-auto">
-        <div className="lg:col-span-1">
-          <Sidebar quest={quest} inventory={inventory} />
-        </div>
-        <div className="lg:col-span-2 flex flex-col gap-4 md:gap-8">
-          <StoryDisplay
-            imageUrl={imageUrl}
-            storyText={currentStory}
-            isImageLoading={isImageLoading}
-            isStoryLoading={isStoryLoading}
-            isAudioLoading={isAudioLoading}
-            isAudioPlaying={isAudioPlaying}
-            canPlayAudio={canPlayAudio}
-            onToggleAudio={handleToggleAudio}
-          />
-          <ChoiceButtons
-            choices={choices}
-            onChoice={handleChoice}
-            isLoading={isLoading}
-          />
-        </div>
+      <main className="p-4 md:p-8 max-w-7xl mx-auto">
+        {renderContent()}
       </main>
     </div>
   );
