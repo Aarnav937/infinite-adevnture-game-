@@ -1,5 +1,4 @@
-
-import { GoogleGenAI, Chat, Type, Content } from "@google/genai";
+import { GoogleGenAI, Chat, Type, Content, Modality } from "@google/genai";
 import type { StorySegment, GameTurn } from '../types';
 
 const API_KEY = process.env.API_KEY;
@@ -12,6 +11,7 @@ const ai = new GoogleGenAI({ apiKey: API_KEY });
 
 const storyModel = 'gemini-2.5-flash';
 const imageModel = 'imagen-4.0-generate-001';
+const ttsModel = 'gemini-2.5-flash-preview-tts';
 
 const artStyle = "in a vibrant, detailed, fantasy digital painting art style, high resolution, epic composition.";
 
@@ -134,5 +134,28 @@ export const generateImage = async (prompt: string): Promise<string> => {
     console.error("Image generation failed:", error);
     // Return a placeholder or error image URL
     return "https://picsum.photos/1280/720?grayscale";
+  }
+};
+
+export const generateSpeech = async (text: string): Promise<string | null> => {
+  if (!text.trim()) return null;
+  try {
+    const response = await ai.models.generateContent({
+      model: ttsModel,
+      contents: [{ parts: [{ text }] }],
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: 'Kore' },
+          },
+        },
+      },
+    });
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    return base64Audio || null;
+  } catch (error) {
+    console.error("Speech generation failed:", error);
+    return null;
   }
 };

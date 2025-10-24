@@ -1,14 +1,45 @@
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import type { Chat } from "@google/genai";
 import Sidebar from './components/Sidebar';
 import StoryDisplay from './components/StoryDisplay';
 import ChoiceButtons from './components/ChoiceButtons';
-import { createAdventureChat, parseGeminiResponse, generateImage } from './services/geminiService';
+import { createAdventureChat, parseGeminiResponse, generateImage, generateSpeech } from './services/geminiService';
 import type { Choice, StorySegment, InventoryUpdate, GameTurn } from './types';
 import { Github, Sparkles, Save } from 'lucide-react';
 
 const SAVE_GAME_KEY = 'infiniteAdventureSaveData';
+
+// Helper functions for audio decoding based on Gemini API documentation
+function decode(base64: string) {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function decodeAudioData(
+  data: Uint8Array,
+  ctx: AudioContext,
+): Promise<AudioBuffer> {
+  // The TTS API returns raw PCM data at 24kHz with 1 channel.
+  const sampleRate = 24000;
+  const numChannels = 1;
+  const dataInt16 = new Int16Array(data.buffer);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+    }
+  }
+  return buffer;
+}
+
 
 const App: React.FC = () => {
   const [quest, setQuest] = useState<string>('');
@@ -22,8 +53,78 @@ const App: React.FC = () => {
   const [isStoryLoading, setIsStoryLoading] = useState<boolean>(true);
   const [saveButtonText, setSaveButtonText] = useState('Save Game');
 
+  const [isAudioLoading, setIsAudioLoading] = useState<boolean>(false);
+  const [isAudioPlaying, setIsAudioPlaying] = useState<boolean>(false);
+  const [canPlayAudio, setCanPlayAudio] = useState<boolean>(false);
+
   const chatRef = useRef<Chat | null>(null);
   const gameHistoryRef = useRef<GameTurn[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const currentAudioBufferRef = useRef<AudioBuffer | null>(null);
+
+  const stopAudio = useCallback(() => {
+    if (audioSourceRef.current) {
+      audioSourceRef.current.onended = null;
+      audioSourceRef.current.stop();
+      audioSourceRef.current = null;
+    }
+    setIsAudioPlaying(false);
+  }, []);
+
+  const playAudioBuffer = useCallback((buffer: AudioBuffer) => {
+    if (!audioContextRef.current) return;
+    stopAudio(); 
+
+    const source = audioContextRef.current.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContextRef.current.destination);
+    source.start();
+    setIsAudioPlaying(true);
+
+    source.onended = () => {
+        setIsAudioPlaying(false);
+        audioSourceRef.current = null;
+    };
+    audioSourceRef.current = source;
+  }, [stopAudio]);
+
+  const generateAndPlayAudio = useCallback(async (text: string) => {
+    setIsAudioLoading(true);
+    setCanPlayAudio(false);
+    stopAudio();
+    currentAudioBufferRef.current = null;
+
+    try {
+        const audioData = await generateSpeech(text);
+        if (audioData) {
+            if (!audioContextRef.current) {
+                audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+            }
+            if (audioContextRef.current.state === 'suspended') {
+                await audioContextRef.current.resume();
+            }
+            const audioBytes = decode(audioData);
+            const audioBuffer = await decodeAudioData(audioBytes, audioContextRef.current);
+            currentAudioBufferRef.current = audioBuffer;
+            setCanPlayAudio(true);
+            playAudioBuffer(audioBuffer);
+        }
+    } catch (error) {
+        console.error("Failed to generate or play audio:", error);
+        setCanPlayAudio(false);
+    } finally {
+        setIsAudioLoading(false);
+    }
+}, [playAudioBuffer, stopAudio]);
+
+  const handleToggleAudio = useCallback(() => {
+    if (isAudioPlaying) {
+        stopAudio();
+    } else if (canPlayAudio && currentAudioBufferRef.current) {
+        playAudioBuffer(currentAudioBufferRef.current);
+    }
+  }, [isAudioPlaying, canPlayAudio, stopAudio, playAudioBuffer]);
 
   const processInventoryUpdates = useCallback((updates: InventoryUpdate[]) => {
     setInventory(prevInventory => {
@@ -64,10 +165,8 @@ const App: React.FC = () => {
 
   const getNextStep = useCallback(async (prompt: string) => {
     setIsLoading(true);
-    setIsImageLoading(true);
     
     if (!chatRef.current) {
-      // Pass history to re-establish context if it exists
       chatRef.current = createAdventureChat(gameHistoryRef.current);
     }
     
@@ -81,23 +180,29 @@ const App: React.FC = () => {
       if (parsedData) {
         gameHistoryRef.current.push({ role: 'model', text: JSON.stringify(parsedData) });
         updateGameState(parsedData);
+        
+        setIsImageLoading(true);
         generateImage(parsedData.image_prompt)
-          .then(url => {
-            setImageUrl(url);
-            setIsImageLoading(false);
-          });
+          .then(url => setImageUrl(url))
+          .finally(() => setIsImageLoading(false));
+
+        generateAndPlayAudio(parsedData.story);
+      } else {
+         stopAudio();
       }
 
     } catch (error) {
       console.error("Error getting next step:", error);
       setCurrentStory("A powerful magical interference has disrupted your adventure. Please try again.");
       setChoices([{ text: "Restart my journey" }]);
+      stopAudio();
     } finally {
       setIsLoading(false);
     }
-  }, [streamStory, updateGameState]);
+  }, [streamStory, updateGameState, generateAndPlayAudio, stopAudio]);
 
   const startGame = useCallback(() => {
+    stopAudio();
     localStorage.removeItem(SAVE_GAME_KEY);
     chatRef.current = null;
     gameHistoryRef.current = [];
@@ -106,11 +211,12 @@ const App: React.FC = () => {
     setCurrentStory('');
     setImageUrl(null);
     setChoices([]);
+    setCanPlayAudio(false);
     getNextStep("Start my adventure in a fantasy world. I am a novice adventurer with no items.");
-  }, [getNextStep]);
+  }, [getNextStep, stopAudio]);
 
   const saveGame = useCallback(() => {
-    if (isLoading) return; // Don't save while loading a turn
+    if (isLoading) return;
 
     const gameState = {
         quest,
@@ -148,6 +254,7 @@ const App: React.FC = () => {
         setIsLoading(false);
         setIsImageLoading(false);
         setIsStoryLoading(false);
+        setCanPlayAudio(false); // Can't replay audio from save, user must trigger new turn
       } catch (error) {
         console.error("Failed to parse saved data, starting new game.", error);
         startGame();
@@ -197,6 +304,10 @@ const App: React.FC = () => {
             storyText={currentStory}
             isImageLoading={isImageLoading}
             isStoryLoading={isStoryLoading}
+            isAudioLoading={isAudioLoading}
+            isAudioPlaying={isAudioPlaying}
+            canPlayAudio={canPlayAudio}
+            onToggleAudio={handleToggleAudio}
           />
           <ChoiceButtons
             choices={choices}
